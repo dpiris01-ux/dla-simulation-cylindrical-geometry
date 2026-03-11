@@ -1,4 +1,4 @@
-# Diffusion-Limited Aggregation Simulation in Gylindrical Geometry (C implementation).
+# Diffusion-Limited Aggregation Simulation in Cylindrical Geometry (C implementation).
 (Also called Diffusion Limited Deposition)
 
 High-performance simulation code for particle deposition and cluster growth on a one–dimensional substrate using random walkers. The implementation includes several computational optimizations and analysis tools for studying interface growth, fractal properties, and tree statistics of the resulting aggregates.
