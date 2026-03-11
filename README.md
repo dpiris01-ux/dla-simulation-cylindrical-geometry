@@ -72,7 +72,7 @@ The scaling relation between tree mass and height is recorded.
 
 The fractal dimension of the aggregate is computed using a **box-counting method** applied at selected simulation times.
 
-ALso using the log-log of tree heights and mass.
+Also using the log-log of tree heights and mass.
 
 ## Interface statistics
 
