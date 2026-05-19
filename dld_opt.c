@@ -27,19 +27,31 @@ double rand_double() {
     return xorshift32()/4294967296.0;
 }
 
-#define L 1048576 // Ancho del sustrato
-#define Lm 3000 // Altura máxima de la caja de simulación
+#define L 2048 // Ancho del sustrato
+#define Lm 6000 // Altura máxima de la caja de simulación
 #define T 80 // Pasos de tiempo 
-#define N 10 // Número de muestras
+#define N 100 // Número de muestras
 
 
 #define diameter 2  
-#define SYSTEM_WIDTH (L * diameter) 
-#define NUM_PARTICLES (L + T * L)
+#define SYSTEM_WIDTH (L*diameter) 
+#define NUM_PARTICLES (L + T*L)
 
-#define D_MAX 160          
+#define D_MAX 140          
 #define L_MIN 1.0         
 #define COLLISION_THRESHOLD 4
+
+// Parámetros del histograma
+
+#define HISTO_BINS 128
+#define NUM_CHECKPOINTS 4
+
+// Acumuladores globales para los histogramas promediados
+
+long long histo_interface_avg[NUM_CHECKPOINTS][HISTO_BINS];
+long long histo_interface_grid[NUM_CHECKPOINTS][HISTO_BINS];
+long long histo_active_zone_avg[NUM_CHECKPOINTS][HISTO_BINS];
+long long histo_all_particles_avg[NUM_CHECKPOINTS][HISTO_BINS];
 
 #define L_PARAM 4
 #define CELL_SIZE L_PARAM
@@ -56,7 +68,7 @@ double active_h_vector[LAST_PARTICLES_TO_SAVE + 1];
 // Configuración de los tiempos a guardar
 
 #define NUM_SNAPSHOTS 8
-int snapshot_times[NUM_SNAPSHOTS] = {10, 20, 30, 40, 50, 60, 70, 80};
+int snapshot_times[NUM_SNAPSHOTS] = {30, 40, 50, 60, 70, 80, 90, 100};
 
 int job_id;
 
@@ -74,10 +86,12 @@ unsigned short int Vicinity_grid[2*D_MAX + 1][2*D_MAX + 1];
 
 int particle_count, TIME[T];
 long double M1[T], M2[T], M3[T], M4[T], M1_active[T], M2_active[T], M3_active[T], M4_active[T], results[30][2], 
-total_results[NUM_SNAPSHOTS][30][2];
+total_results[NUM_SNAPSHOTS][30][2], M1_grid[T], M2_grid[T], M3_grid[T], M4_grid[T];
 long double N_PARTICLES[T], total_rg_per_layer[T]; // Almacenar el número total de partículas promedio por capa
 double particles_list[NUM_PARTICLES][2], interface_heights[L];
 double collision_dist_sq;
+
+int interface_heights_grid[SYSTEM_WIDTH];
 
 // Array para acumular el RMS Thickness promedio por capa temporal
 
@@ -85,17 +99,16 @@ long double total_rms_per_layer[T];
 
 // Variables globales para el análisis de árboles
 
-#define MAX_TREES 400
-#define MAX_N_BIN 1000000 // Máximo N_tree (masa) a promediar. Un árbol de masa mayor será ignorado
+#define MAX_N_BIN 10000000 // Máximo N_tree (masa) a promediar. Un árbol de masa mayor será ignorado
 
-int umbral_minimo = 400;
+int umbral_minimo = 100;
 
 // Arrays para promedio sobre N muestras
 
 long double H_sum_binned[NUM_SNAPSHOTS][MAX_N_BIN];
 int Count_binned[NUM_SNAPSHOTS][MAX_N_BIN];
 
-#define MAX_GRID_CELLS 300000000 
+#define MAX_GRID_CELLS 5000000
 
 int *grid_particles[MAX_GRID_CELLS];
 int grid_counts[MAX_GRID_CELLS];      
@@ -598,21 +611,73 @@ void save_particles(const char* filename, int count) {
 }
 
 void get_interface_profile(int p_count, double* out_heights) {
+    
+    // Inicializar al nivel del sustrato
 
     for (int i = 0; i < L; i++) out_heights[i] = 0.0;
+
+    double R = diameter/2.0;
 
     for (int i = 0; i < p_count; i++) {
 
         double px = particles_list[i][0];
         double py = particles_list[i][1];
 
-        int bin_index = (int)floor(px / diameter);
+        // Rango de bines que esta partícula cubre físicamente [px - R, px + R]
 
-        if (bin_index >= 0 && bin_index < L) {
+        int bin_start = (int)floor((px - R)/diameter);
+        int bin_end   = (int)floor((px + R)/diameter);
 
-            if (py > out_heights[bin_index]) {
+        for (int b = bin_start; b <= bin_end; b++) {
+            
+            // Aplicar condiciones de contorno periódicas al índice del bin
 
-                out_heights[bin_index] = py;
+            int wrapped_b = (b%L + L)%L;
+
+            // Centro geométrico del bin actual para evaluar la altura
+
+            double bin_center_x = (wrapped_b + 0.5) * diameter;
+
+            // Distancia lateral periódica entre el centro del bin y la partícula
+
+            double dx = fabs(px - bin_center_x);
+
+            if (dx > SYSTEM_WIDTH/2.0) dx = SYSTEM_WIDTH - dx;
+
+            // Si el punto central del bin cae bajo el dominio físico de esta partícula
+
+            if (dx <= R) {
+
+                // Calcular la altura real de la cúpula de la partícula en ese X
+
+                double h_contribution = py + sqrt(R*R - dx*dx);
+
+                // Actualizar si esta cúpula es más alta que lo registrado en el bin
+
+                if (h_contribution > out_heights[wrapped_b]) {
+                    out_heights[wrapped_b] = h_contribution;
+                }
+            }
+        }
+    }
+}
+
+void get_on_lattice_interface() {
+
+    // Barrido por cada columna de la red discreta
+
+    for (int x = 0; x < SYSTEM_WIDTH; x++) {
+
+        interface_heights_grid[x] = 0; // Valor por defecto (sustrato)
+        
+        // Escanear desde la máxima altura posible hacia abajo
+
+        for (int y = Lm - 1; y >= 0; y--) {
+
+            if (Y_grid[x][y] > 0) {
+
+                interface_heights_grid[x] = y; // Se detectó una partícula
+                break; // Pasamos a la siguiente columna X
             }
         }
     }
@@ -873,7 +938,7 @@ int main(int argc, char *argv[]) {
                     if (walker_iy >= 0 && walker_iy < Lm) d_wc = Omega_grid[walker_ix][walker_iy];
 
                     if (d_wc <= COLLISION_THRESHOLD) current_step = L_MIN;
-                    else current_step = d_wc - COLLISION_THRESHOLD
+                    else current_step = d_wc - COLLISION_THRESHOLD;
                     double move_theta = rand_double()*2.0*M_PI;
 
                     if (current_step == L_MIN) {
@@ -924,7 +989,7 @@ int main(int argc, char *argv[]) {
 
                         // Condición de escape
 
-                        if (walker_y > 5*sample_max_h || walker_y < -diameter) {
+                        if (walker_y > 5*sample_max_h + 100 || walker_y < -diameter) {
 
                             // Partícula perdida, relanzar
 
@@ -979,18 +1044,46 @@ int main(int argc, char *argv[]) {
             double current_rms = get_rms_thickness(particle_count);
             total_rms_per_layer[t] += current_rms;
 
+            // Llamar a la nueva función en lugar de get_interface_profile
+
+            get_on_lattice_interface();
+
+            long double hm1_grid = 0.0, hm2_grid = 0.0, hm3_grid = 0.0, hm4_grid = 0.0;
+
+            // Calcular las sumas sobre la red discreta
+
+            for (int k = 0; k < SYSTEM_WIDTH; k++) {
+
+                // Castear la altura discreta a long double para los cálculos de momentos
+
+                long double hi = (long double)interface_heights_grid[k];
+
+                hm1_grid += hi;
+                hm2_grid += hi * hi;
+                hm3_grid += hi * hi * hi;
+                hm4_grid += hi * hi * hi * hi;
+            }
+
+            // Los momentos se promedian sobre el ancho real de la red
+
+            M1_grid[t] += hm1_grid/(long double)SYSTEM_WIDTH;
+            M2_grid[t] += hm2_grid/(long double)SYSTEM_WIDTH;
+            M3_grid[t] += hm3_grid/(long double)SYSTEM_WIDTH;
+            M4_grid[t] += hm4_grid/(long double)SYSTEM_WIDTH;
+
 
             TIME[t] = t + 1;
 
             int current_t = t + 1;
             int snapshot_found = -1;
 
-            // Verificamos si el tiempo actual coincide con alguno de nuestros objetivos
+            // Verificamos si el tiempo actual coincide con el porcentaje objetivo de T
 
-            for(int k=0; k < NUM_SNAPSHOTS; k++){
+            for(int k = 0; k < NUM_SNAPSHOTS; k++){
 
-                if(current_t == snapshot_times[k]){
-
+                int target_time = (snapshot_times[k]*T)/100;
+                
+                if(current_t == target_time){
                     snapshot_found = k;
                     break;
                 }
@@ -1012,6 +1105,67 @@ int main(int argc, char *argv[]) {
 
                     total_results[snapshot_idx][k][0] += results[k][0]; // Guardar en su "slot" de tiempo
                     total_results[snapshot_idx][k][1] += results[k][1];
+                }
+            }
+
+            // Cálculo de los histogramas
+
+            int checkpoint_idx = -1;
+
+            if (current_t == T/4) checkpoint_idx = 0;
+            else if (current_t == T/2) checkpoint_idx = 1;
+            else if (current_t == (3*T)/4) checkpoint_idx = 2;
+            else if (current_t == T) checkpoint_idx = 3;
+
+            if (checkpoint_idx != -1) {
+                
+                double max_height_for_histo = (double)Lm; 
+                double bin_width = max_height_for_histo/HISTO_BINS;
+
+                // Histograma de la interfaz
+                
+                for (int k = 0; k < L; k++) {
+                    double y = interface_heights[k];
+                    
+                    // CORE CUT: Solo tomamos en cuenta lo que está por encima del sustrato inicial
+                    
+                    if (y > diameter && y < max_height_for_histo) { 
+                        int bin_idx = (int)(y/bin_width);
+                        if (bin_idx >= 0 && bin_idx < HISTO_BINS) histo_interface_avg[checkpoint_idx][bin_idx]++;
+                    }
+                }
+
+                // Histograma de la interfaz ON-LATTICE
+                
+                for (int k = 0; k < SYSTEM_WIDTH; k++) {
+                    double y = (double)interface_heights_grid[k];
+                    
+                    // CORE CUT: Solo tomamos en cuenta lo que está por encima del sustrato inicial
+                    
+                    if (y > diameter && y < max_height_for_histo) { 
+                        int bin_idx = (int)(y/bin_width);
+                        if (bin_idx >= 0 && bin_idx < HISTO_BINS) histo_interface_grid[checkpoint_idx][bin_idx]++;
+                    }
+                }
+
+                // Histograma de la zona activa
+                
+                for (int k = 0; k < active_h_count; k++) {
+                    double y = active_h_vector[k];
+                    if (y > diameter && y < max_height_for_histo) {
+                        int bin_idx = (int)(y/bin_width);
+                        if (bin_idx >= 0 && bin_idx < HISTO_BINS) histo_active_zone_avg[checkpoint_idx][bin_idx]++;
+                    }
+                }
+
+                // Histograma de todas las partículas
+                
+                for (int k = L; k < particle_count; k++) {
+                    double p_y = particles_list[k][1];
+                    if (p_y > diameter && p_y < max_height_for_histo) {
+                        int bin_idx = (int)(p_y/bin_width);
+                        if (bin_idx >= 0 && bin_idx < HISTO_BINS) histo_all_particles_avg[checkpoint_idx][bin_idx]++;
+                    }
                 }
             }
 
@@ -1040,7 +1194,6 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < T; i++) {
             
             // Calculamos N teórico promedio por capa (L partículas por capa)
-            // Esto es más limpio que usar particle_count que se reinicia.
 
             long long N_acumulado = (long long)(i + 1)*L;
             
@@ -1057,12 +1210,20 @@ int main(int argc, char *argv[]) {
     printf("\nGuardando análisis de interfaz...\n");
     
     char file_w2[60], file_sk[60], file_kt[60], file_mean[60];
+    char file_w2_grid[60], file_sk_grid[60], file_kt_grid[60], file_mean_grid[60];
     char file_w2_active[60], file_sk_active[60], file_kt_active[60], file_mean_active[60];
 
     sprintf(file_w2, "roughness_opt_L=%d_run=%d.dat", L, job_id);
     sprintf(file_sk, "skewness_opt_L=%d_run=%d.dat", L, job_id);
     sprintf(file_kt, "kurtosis_opt_L=%d_run=%d.dat", L, job_id);
     sprintf(file_mean, "mean_height_opt_L=%d_run=%d.dat", L, job_id);
+
+    // lattice
+
+    sprintf(file_w2_grid, "roughness_grid_opt_L=%d_run=%d.dat", L, job_id);
+    sprintf(file_sk_grid, "skewness_grid_opt_L=%d_run=%d.dat", L, job_id);
+    sprintf(file_kt_grid, "kurtosis_grid_opt_L=%d_run=%d.dat", L, job_id);
+    sprintf(file_mean_grid, "mean_height_grid_opt_L=%d_run=%d.dat", L, job_id);
 
     sprintf(file_w2_active, "roughness_active_opt_L=%d_run=%d.dat", L, job_id);
     sprintf(file_sk_active, "skewness_active_opt_L=%d_run=%d.dat", L, job_id);
@@ -1071,6 +1232,9 @@ int main(int argc, char *argv[]) {
 
     FILE *filevar = fopen(file_w2, "w"), *filesk = fopen(file_sk, "w"), *filekt = fopen(file_kt, "w"), 
     *filemean_h = fopen(file_mean, "w");
+
+    FILE *filevar_grid = fopen(file_w2_grid, "w"), *filesk_grid = fopen(file_sk_grid, "w"), *filekt_grid = fopen(file_kt_grid, "w"), 
+    *filemean_h_grid = fopen(file_mean_grid, "w");
 
     FILE *filevar_active = fopen(file_w2_active, "w"), *filesk_active = fopen(file_sk_active, "w"), *filekt_active = fopen(file_kt_active, "w"), 
     *filemean_h_active = fopen(file_mean_active, "w");
@@ -1100,7 +1264,7 @@ int main(int argc, char *argv[]) {
         M3_active[tm] /= (long double)N;
         M4_active[tm] /= (long double)N;
 
-        long double varC_active = M2_active[tm] - (M1_active[tm] * M1_active[tm]);
+        long double varC_active = M2_active[tm] - (M1_active[tm]*M1_active[tm]);
         long double k3C_active = M3_active[tm] - 3*M1_active[tm]*M2_active[tm] + 2*(M1_active[tm]*M1_active[tm]*M1_active[tm]);
         long double k4C_active = M4_active[tm] - 4*M1_active[tm]*M3_active[tm] - 3*(M2_active[tm]*M2_active[tm]) 
                             + 12*(M1_active[tm]*M1_active[tm])*M2_active[tm] 
@@ -1115,12 +1279,36 @@ int main(int argc, char *argv[]) {
 
         fprintf(filemean_h_active, "%d %.9Lf\n", TIME[tm], M1_active[tm]);
 
+        // lattice
+
+        M1_grid[tm] /= (long double)N;
+        M2_grid[tm] /= (long double)N;
+        M3_grid[tm] /= (long double)N;
+        M4_grid[tm] /= (long double)N;
+
+        long double varC_grid = M2_grid[tm] - (M1_grid[tm]*M1_grid[tm]);
+        long double k3C_grid = M3_grid[tm] - 3*M1_grid[tm]*M2_grid[tm] + 2*(M1_grid[tm]*M1_grid[tm]*M1_grid[tm]);
+        long double k4C_grid = M4_grid[tm] - 4*M1_grid[tm]*M3_grid[tm] - 3*(M2_grid[tm]*M2_grid[tm]) + 12*(M1_grid[tm]*M1_grid[tm])*M2_grid[tm] - 6*(M1_grid[tm]*M1_grid[tm]*M1_grid[tm]*M1_grid[tm]);
+
+        long double skewnessC_grid = (varC_grid > 1e-9) ? k3C_grid/(varC_grid * sqrt(varC_grid)) : 0.0;
+        long double kurtosisC_grid = (varC_grid > 1e-9) ? k4C_grid/(varC_grid * varC_grid) : 0.0;
+
+        fprintf(filevar_grid, "%d %.9Lf\n", TIME[tm], varC_grid);
+        fprintf(filesk_grid, "%d %.9Lf\n", TIME[tm], skewnessC_grid);
+        fprintf(filekt_grid, "%d %.9Lf\n", TIME[tm], kurtosisC_grid);
+
+        fprintf(filemean_h_grid, "%d %.9Lf\n", TIME[tm], M1_grid[tm]);
+
     }
 
     fclose(filevar);
     fclose(filesk);
     fclose(filekt);
     fclose(filemean_h);
+    fclose(filevar_grid);
+    fclose(filesk_grid);
+    fclose(filekt_grid);
+    fclose(filemean_h_grid);
     fclose(filevar_active);
     fclose(filesk_active);
     fclose(filekt_active);
@@ -1147,6 +1335,65 @@ int main(int argc, char *argv[]) {
         }
 
         fclose(f_frac);
+    }
+
+    double max_height_for_histo = (double)Lm;
+    double bin_width = max_height_for_histo/HISTO_BINS;
+
+    for (int k = 0; k < NUM_CHECKPOINTS; k++) {
+
+        char fname_interface[50], fname_interface_grid[50], fname_active[50], fname_all[50];
+        int percentage = (k + 1) * 25;
+
+        sprintf(fname_interface, "histo_interfaz_%d_percent_run%d.dat", percentage, job_id);
+        sprintf(fname_interface_grid, "histo_int_grid_%d_percent_run%d.dat", percentage, job_id);
+        sprintf(fname_active, "histo_active_zone_%d_percent_run%d.dat", percentage, job_id);
+        sprintf(fname_all, "histo_all_particles_%d_percent_run%d.dat", percentage, job_id);
+
+        FILE* f_int = fopen(fname_interface, "w");
+        FILE* f_grid = fopen(fname_interface_grid, "w");
+        FILE* f_act = fopen(fname_active, "w");
+        FILE* f_all = fopen(fname_all, "w");
+
+        if (f_int && f_grid && f_act && f_all) {
+
+            fprintf(f_int, "# Height\tProbability_Density\n");
+            fprintf(f_grid, "# Height\tProbability_Density\n");
+            fprintf(f_act, "# Height\tProbability_Density\n");
+            fprintf(f_all, "# Height\tProbability_Density\n");
+
+            double sum_int = 0.0, sum_grid = 0.0, sum_act = 0.0, sum_all = 0.0;
+
+            for (int bin = 0; bin < HISTO_BINS; bin++) {
+                sum_int += histo_interface_avg[k][bin];
+                sum_grid += histo_interface_grid[k][bin];
+                sum_act += histo_active_zone_avg[k][bin];
+                sum_all += histo_all_particles_avg[k][bin];
+            }
+
+            for (int bin = 0; bin < HISTO_BINS; bin++) {
+                
+                // Centro del bin lineal
+
+                double height_of_bin = (bin + 0.5) * bin_width; 
+                
+                double rho_int = (sum_int > 0) ? (histo_interface_avg[k][bin]/(sum_int*bin_width)) : 0.0;
+                double rho_grid = (sum_grid > 0) ? (histo_interface_grid[k][bin]/(sum_grid*bin_width)) : 0.0;
+                double rho_act = (sum_act > 0) ? (histo_active_zone_avg[k][bin]/(sum_act*bin_width)) : 0.0;
+                double rho_all = (sum_all > 0) ? (histo_all_particles_avg[k][bin]/(sum_all*bin_width)) : 0.0;
+
+                // Filtrar los bines vacíos al guardar
+                if (rho_int > 0.0) fprintf(f_int, "%.6f\t%.9f\n", height_of_bin, rho_int);
+                if (rho_grid > 0.0) fprintf(f_grid, "%.6f\t%.9f\n", height_of_bin, rho_grid);
+                if (rho_act > 0.0) fprintf(f_act, "%.6f\t%.9f\n", height_of_bin, rho_act);
+                if (rho_all > 0.0) fprintf(f_all, "%.6f\t%.9f\n", height_of_bin, rho_all);
+            }
+        }
+
+        if (f_int) fclose(f_int);
+        if (f_grid) fclose(f_grid);
+        if (f_act) fclose(f_act);
+        if (f_all) fclose(f_all);
     }
 
     save_averaged_tree_data();
